@@ -1,0 +1,15 @@
+Mall Road,Kalma Chowk
+Mall Road,Liberty Market
+Mall Road,Mall Road
+Mall Road,Data Darbar
+Mall Road,Gulberg Main
+Liberty Market,Gulberg Main
+Jz,ns j
+Data Darbar,Jz
+Jz,Mall Road
+jz ,Kalma Chowk
+Kalma Chowk,Jz
+Liberty Market,Data Darbar
+Jz,Gulberg Main
+uet,Data Darbar
+abc,uet
