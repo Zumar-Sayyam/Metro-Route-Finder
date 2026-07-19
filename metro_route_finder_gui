@@ -1,0 +1,462 @@
+#include "raylib.h"
+#include <string>
+#include <vector>
+#include <queue>
+#include <fstream>
+#include <algorithm>
+#include <cmath>
+#include <map>
+#include <functional>
+using namespace std;
+
+struct Station {
+    string name;
+    Vector2 position;
+};
+
+struct Route {
+    int stationA, stationB;
+};
+
+struct Animation {
+    vector<int> path;
+    float progress = 0;
+    int edgeIndex = 0;
+    bool running = false, finished = false, isDFS = false;
+};
+
+static vector<Station> stationList;
+static vector<Route>   routeList;
+static Animation       anim;
+
+static string sourceInput = "", destInput = "", routeField1 = "", routeField2 = "", newStationName = "";
+static bool sourceActive = false, destActive = false, route1Active = false, route2Active = false, newStationActive = false;
+static bool showAddRoute = false, showAddStation = false;
+static string routeMessage = "", stationMessage = "", statusText = "Type source & destination, then press BFS or DFS";
+
+static Vector2 cameraOffset = { 0, 0 }, panStartPoint = { 0, 0 };
+static bool isPanning = false;
+static int draggedStationIndex = -1;
+static Vector2 dragOffset = { 0, 0 };
+
+string toLower(string s) {
+    for (auto& c : s)
+        c = tolower((unsigned char)c);
+    return s;
+}
+
+int findStation(string name) {
+    string nameLower = toLower(name);
+    for (int i = 0; i < (int)stationList.size(); i++)
+        if (toLower(stationList[i].name) == nameLower) return i;
+    return -1;
+}
+
+bool routeExists(int a, int b) {
+    for (auto& r : routeList)
+        if ((r.stationA == a && r.stationB == b) || (r.stationA == b && r.stationB == a)) return true;
+    return false;
+}
+
+void saveAll() {
+    ofstream namesFile("station_names.txt");
+    for (auto& s : stationList) namesFile << s.name << "\n";
+
+    ofstream routesFile("stations.txt");
+    for (auto& r : routeList) routesFile << stationList[r.stationA].name << "," << stationList[r.stationB].name << "\n";
+
+    ofstream positionsFile("positions.txt");
+    for (auto& s : stationList) positionsFile << s.name << "," << s.position.x << "," << s.position.y << "\n";
+}
+
+void loadAll() {
+    map<string, Vector2> positionMap;
+    ifstream posFile("positions.txt");
+    string line;
+    while (getline(posFile, line)) {
+        auto comma1 = line.find(','); if (comma1 == string::npos) continue;
+        auto comma2 = line.find(',', comma1 + 1); if (comma2 == string::npos) continue;
+        positionMap[line.substr(0, comma1)] = {
+            stof(line.substr(comma1 + 1, comma2 - comma1 - 1)),
+            stof(line.substr(comma2 + 1))
+        };
+    }
+
+    ifstream namesFile("station_names.txt");
+    while (getline(namesFile, line))
+        if (!line.empty() && findStation(line) == -1)
+            stationList.push_back({ line, positionMap.count(line) ? positionMap[line] : Vector2{0, 0} });
+
+    ifstream routesFile("stations.txt");
+    while (getline(routesFile, line)) {
+        auto comma = line.find(','); if (comma == string::npos) continue;
+        string name1 = line.substr(0, comma), name2 = line.substr(comma + 1);
+        if (findStation(name1) == -1) stationList.push_back({ name1, positionMap.count(name1) ? positionMap[name1] : Vector2{0, 0} });
+        if (findStation(name2) == -1) stationList.push_back({ name2, positionMap.count(name2) ? positionMap[name2] : Vector2{0, 0} });
+        int a = findStation(name1), b = findStation(name2);
+        if (a != -1 && b != -1 && !routeExists(a, b)) routeList.push_back({ a, b });
+    }
+}
+
+vector<int> bfs(int source, int destination) {
+    if (source == destination) return { source };
+    queue<int> toVisit;
+    vector<int> parent(stationList.size(), -1);
+    vector<bool> visited(stationList.size(), false);
+    toVisit.push(source); visited[source] = true;
+    bool found = false;
+    while (!toVisit.empty()) {
+        int current = toVisit.front(); toVisit.pop();
+        if (current == destination) { found = true; break; }
+        for (auto& r : routeList) {
+            int neighbor = (r.stationA == current ? r.stationB : r.stationB == current ? r.stationA : -1);
+            if (neighbor != -1 && !visited[neighbor]) {
+                visited[neighbor] = true; parent[neighbor] = current; toVisit.push(neighbor);
+            }
+        }
+    }
+    if (!found || parent[destination] == -1) return {};
+    vector<int> resultPath;
+    for (int node = destination; node != -1; node = parent[node]) resultPath.push_back(node);
+    reverse(resultPath.begin(), resultPath.end());
+    return resultPath;
+}
+
+bool dfsHelper(int current, int target, vector<bool>& visited, vector<int>& path) {
+    visited[current] = true; path.push_back(current);
+    if (current == target) return true;
+    for (auto& r : routeList) {
+        int neighbor = (r.stationA == current ? r.stationB : r.stationB == current ? r.stationA : -1);
+        if (neighbor != -1 && !visited[neighbor] && dfsHelper(neighbor, target, visited, path)) return true;
+    }
+    path.pop_back(); return false;
+}
+
+vector<int> dfs(int source, int destination) {
+    vector<bool> visited(stationList.size(), false);
+    vector<int> path;
+    dfsHelper(source, destination, visited, path);
+    return path;
+}
+
+void handleTyping(string& text, bool isActive) {
+    if (!isActive) return;
+    int key = GetCharPressed();
+    while (key > 0) {
+        if (key >= 32 && key <= 126 && (int)text.size() < 40) text += (char)key;
+        key = GetCharPressed();
+    }
+    if (IsKeyPressed(KEY_BACKSPACE) && !text.empty()) text.pop_back();
+}
+
+bool drawButton(Rectangle rect, const char* label, Color bgColor, Color textColor, Vector2 mousePos, int fontSize = 16) {
+    bool hovered = CheckCollisionPointRec(mousePos, rect);
+    Color displayColor = hovered
+        ? Color{ (unsigned char)min(255, (int)bgColor.r + 35), (unsigned char)min(255, (int)bgColor.g + 35), (unsigned char)min(255, (int)bgColor.b + 35), 255 }
+    : bgColor;
+    DrawRectangleRounded(rect, .2f, 6, displayColor);
+    DrawRectangleRoundedLinesEx(rect, .2f, 6, 1.2f, ColorAlpha(WHITE, .25f));
+    int textWidth = MeasureText(label, fontSize);
+    DrawText(label, (int)(rect.x + rect.width / 2 - textWidth / 2), (int)(rect.y + rect.height / 2 - fontSize / 2), fontSize, textColor);
+    return hovered && IsMouseButtonPressed(MOUSE_LEFT_BUTTON);
+}
+
+void drawInputBox(Rectangle rect, const char* header, string& text, bool& isActive, Color accentColor, Vector2 mousePos) {
+    DrawRectangleRec(rect, { 25, 38, 68, 255 });
+    DrawRectangleLinesEx(rect, isActive ? 2.5f : 1.2f, isActive ? accentColor : Color{ 75, 105, 160, 200 });
+    DrawText(header, (int)rect.x + 14, (int)(rect.y + 8), 13, isActive ? accentColor : Color{ 110, 150, 210, 255 });
+    DrawText((text.empty() && !isActive ? "---" : text).c_str(), (int)rect.x + 14, (int)(rect.y + 28), 22, text.empty() ? Color{ 90, 110, 150, 180 } : WHITE);
+    if (isActive && (int)(GetTime() * 2) % 2 == 0) {
+        int textWidth = MeasureText(text.c_str(), 22);
+        DrawRectangle((int)rect.x + 14 + textWidth + 2, (int)(rect.y + 28), 2, 22, WHITE);
+    }
+    if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) isActive = CheckCollisionPointRec(mousePos, rect);
+}
+
+void drawPopup(int screenW, int screenH, const char* title, Vector2 mousePos,
+    const char* label1, string& field1, bool& field1Active,
+    const char* label2, string& field2, bool& field2Active,
+    string& message, bool& isOpen,
+    function<void()> onConfirm, const char* hint = "")
+{
+    DrawRectangle(0, 0, screenW, screenH, { 0, 0, 0, 170 });
+    float popupW = 520, popupH = field2.empty() ? 260 : 380;
+    Rectangle popupRect = { (float)screenW / 2 - popupW / 2, (float)screenH / 2 - popupH / 2, popupW, popupH };
+    DrawRectangleRounded(popupRect, .05f, 8, { 14, 22, 45, 255 });
+    DrawRectangleRoundedLinesEx(popupRect, .05f, 8, 1.5f, { 50, 110, 200, 220 });
+    DrawText(title, (int)(popupRect.x + 22), (int)(popupRect.y + 20), 18, { 60, 180, 255, 255 });
+    DrawLine((int)popupRect.x + 18, (int)popupRect.y + 50, (int)(popupRect.x + popupW - 18), (int)popupRect.y + 50, { 40, 65, 110, 180 });
+
+    DrawText(label1, (int)popupRect.x + 22, (int)popupRect.y + 62, 13, { 100, 155, 215, 255 });
+    Rectangle inputRect1 = { popupRect.x + 18, popupRect.y + 80, popupW - 36, 44 };
+    DrawRectangleRec(inputRect1, { 20, 30, 62, 255 });
+    DrawRectangleLinesEx(inputRect1, field1Active ? 2.f : 1.f, field1Active ? Color{ 30, 180, 255, 255 } : Color{ 50, 82, 135, 180 });
+    DrawText(field1.c_str(), (int)inputRect1.x + 12, (int)(inputRect1.y + 12), 16, WHITE);
+    if (field1Active && (int)(GetTime() * 2) % 2 == 0) {
+        int tw = MeasureText(field1.c_str(), 16);
+        DrawRectangle((int)inputRect1.x + 12 + tw + 1, (int)(inputRect1.y + 12), 2, 16, WHITE);
+    }
+    if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) { field1Active = CheckCollisionPointRec(mousePos, inputRect1); if (field1Active) field2Active = false; }
+    handleTyping(field1, field1Active);
+
+    float nextY = popupRect.y + 136;
+    if (!string(label2).empty()) {
+        DrawText(label2, (int)popupRect.x + 22, (int)nextY, 13, { 100, 155, 215, 255 });
+        Rectangle inputRect2 = { popupRect.x + 18, nextY + 18, popupW - 36, 44 };
+        DrawRectangleRec(inputRect2, { 20, 30, 62, 255 });
+        DrawRectangleLinesEx(inputRect2, field2Active ? 2.f : 1.f, field2Active ? Color{ 30, 180, 255, 255 } : Color{ 50, 82, 135, 180 });
+        DrawText(field2.c_str(), (int)inputRect2.x + 12, (int)(inputRect2.y + 12), 16, WHITE);
+        if (field2Active && (int)(GetTime() * 2) % 2 == 0) {
+            int tw = MeasureText(field2.c_str(), 16);
+            DrawRectangle((int)inputRect2.x + 12 + tw + 1, (int)(inputRect2.y + 12), 2, 16, WHITE);
+        }
+        if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) { field2Active = CheckCollisionPointRec(mousePos, inputRect2); if (field2Active) field1Active = false; }
+        handleTyping(field2, field2Active);
+        nextY += 80;
+        if (hint && string(hint).size() > 0) { DrawText(hint, (int)popupRect.x + 22, (int)nextY, 11, { 100, 150, 200, 180 }); nextY += 18; }
+    }
+
+    if (!message.empty()) {
+        Color msgColor = message.find("added") != string::npos || message.find("Route added") != string::npos
+            ? Color{ 30, 220, 130, 255 } : Color{ 255, 160, 60, 255 };
+        DrawRectangle((int)popupRect.x + 18, (int)nextY, (int)(popupW - 36), 26, { 20, 28, 55, 255 });
+        DrawText(message.c_str(), (int)popupRect.x + 26, (int)nextY + 6, 13, msgColor);
+        nextY += 32;
+    }
+
+    if (drawButton({ popupRect.x + 18, nextY + 4, 220, 42 }, "+ Confirm", { 18, 115, 72, 255 }, WHITE, mousePos)) onConfirm();
+    if (drawButton({ popupRect.x + popupW - 238, nextY + 4, 220, 42 }, "Cancel", { 65, 28, 28, 255 }, { 255, 150, 150, 255 }, mousePos)
+        || IsKeyPressed(KEY_ESCAPE)) {
+        isOpen = false; field1.clear(); field2.clear(); message = ""; field1Active = field2Active = false;
+    }
+}
+
+void centerCamera(int screenW, int screenH, int panelWidth) {
+    if (stationList.empty()) return;
+    float minX = 1e9, maxX = -1e9, minY = 1e9, maxY = -1e9;
+    for (auto& s : stationList) {
+        minX = min(minX, s.position.x); maxX = max(maxX, s.position.x);
+        minY = min(minY, s.position.y); maxY = max(maxY, s.position.y);
+    }
+    cameraOffset = {
+        (panelWidth + (screenW - panelWidth) / 2.f) - (minX + maxX) / 2.f,
+        (screenH / 2.f) - (minY + maxY) / 2.f
+    };
+}
+
+int main() {
+    SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT);
+    InitWindow(1280, 720, "Lahore Metro Route Finder");
+    SetTargetFPS(60);
+    loadAll();
+    bool firstFrame = true;
+
+    while (!WindowShouldClose()) {
+        int screenW = GetScreenWidth(), screenH = GetScreenHeight();
+        const int panelWidth = 420;
+        Vector2 mousePos = GetMousePosition();
+        float deltaTime = GetFrameTime(), pulseTime = (float)GetTime() * 3.f;
+
+        if (firstFrame) { centerCamera(screenW, screenH, panelWidth); firstFrame = false; }
+
+        if (anim.running && !anim.finished && (int)anim.path.size() > 1) {
+            anim.progress += 2.2f * deltaTime;
+            if (anim.progress >= 1.f) {
+                anim.progress = 0; anim.edgeIndex++;
+                if (anim.edgeIndex >= (int)anim.path.size() - 1) {
+                    anim.edgeIndex = (int)anim.path.size() - 2;
+                    anim.progress = 1; anim.finished = true; anim.running = false;
+                }
+            }
+        }
+
+        if (!showAddRoute && !showAddStation) {
+            handleTyping(sourceInput, sourceActive);
+            handleTyping(destInput, destActive);
+            if (mousePos.x > panelWidth) {
+                if (IsMouseButtonPressed(MOUSE_RIGHT_BUTTON) && draggedStationIndex == -1) { isPanning = true; panStartPoint = mousePos; }
+                if (isPanning) { cameraOffset.x += mousePos.x - panStartPoint.x; cameraOffset.y += mousePos.y - panStartPoint.y; panStartPoint = mousePos; }
+                if (IsMouseButtonReleased(MOUSE_RIGHT_BUTTON)) isPanning = false;
+                if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON))
+                    for (int i = 0; i < (int)stationList.size(); i++) {
+                        Vector2 worldPos = { stationList[i].position.x + cameraOffset.x, stationList[i].position.y + cameraOffset.y };
+                        if (sqrtf(powf(mousePos.x - worldPos.x, 2) + powf(mousePos.y - worldPos.y, 2)) < 28) {
+                            draggedStationIndex = i; dragOffset = { mousePos.x - worldPos.x, mousePos.y - worldPos.y }; break;
+                        }
+                    }
+                if (IsMouseButtonDown(MOUSE_LEFT_BUTTON) && draggedStationIndex != -1) {
+                    stationList[draggedStationIndex].position.x = mousePos.x - dragOffset.x - cameraOffset.x;
+                    stationList[draggedStationIndex].position.y = mousePos.y - dragOffset.y - cameraOffset.y;
+                }
+                if (IsMouseButtonReleased(MOUSE_LEFT_BUTTON) && draggedStationIndex != -1) { saveAll(); draggedStationIndex = -1; }
+                if (IsKeyPressed(KEY_C)) centerCamera(screenW, screenH, panelWidth);
+            }
+        }
+
+        BeginDrawing();
+        DrawRectangle(panelWidth, 0, screenW - panelWidth, screenH, { 12, 18, 32, 255 });
+        for (int x = panelWidth; x < screenW; x += 100) DrawLine(x, 0, x, screenH, { 22, 32, 58, 130 });
+        for (int y = 0; y < screenH; y += 100) DrawLine(panelWidth, y, screenW, y, { 22, 32, 58, 130 });
+
+        // Draw all route edges
+        for (auto& r : routeList) {
+            Vector2 posA = { stationList[r.stationA].position.x + cameraOffset.x, stationList[r.stationA].position.y + cameraOffset.y };
+            Vector2 posB = { stationList[r.stationB].position.x + cameraOffset.x, stationList[r.stationB].position.y + cameraOffset.y };
+            DrawLineEx(posA, posB, 4, { 45, 72, 125, 210 });
+        }
+
+        // Draw animated path
+        if (!anim.path.empty()) {
+            Color pathColor = anim.isDFS ? Color{ 255, 165, 40, 255 } : Color{ 30, 225, 130, 255 };
+            for (int i = 0; i < anim.edgeIndex && i < (int)anim.path.size() - 1; i++) {
+                Vector2 posA = { stationList[anim.path[i]].position.x + cameraOffset.x, stationList[anim.path[i]].position.y + cameraOffset.y };
+                Vector2 posB = { stationList[anim.path[i + 1]].position.x + cameraOffset.x, stationList[anim.path[i + 1]].position.y + cameraOffset.y };
+                DrawLineEx(posA, posB, 14, ColorAlpha(pathColor, .18f));
+                DrawLineEx(posA, posB, 7, pathColor);
+            }
+            if (anim.edgeIndex < (int)anim.path.size() - 1) {
+                Vector2 posA = { stationList[anim.path[anim.edgeIndex]].position.x + cameraOffset.x, stationList[anim.path[anim.edgeIndex]].position.y + cameraOffset.y };
+                Vector2 posB = { stationList[anim.path[anim.edgeIndex + 1]].position.x + cameraOffset.x, stationList[anim.path[anim.edgeIndex + 1]].position.y + cameraOffset.y };
+                Vector2 midPoint = { posA.x + (posB.x - posA.x) * anim.progress, posA.y + (posB.y - posA.y) * anim.progress };
+                DrawLineEx(posA, posB, 14, ColorAlpha(pathColor, .18f));
+                DrawLineEx(posA, midPoint, 7, pathColor);
+                DrawCircleV(midPoint, 20, ColorAlpha(pathColor, .28f));
+                DrawCircleV(midPoint, 10, WHITE);
+            }
+        }
+
+        // Draw station nodes
+        int sourceIndex = findStation(sourceInput), destIndex = findStation(destInput);
+        for (int i = 0; i < (int)stationList.size(); i++) {
+            Vector2 screenPos = { stationList[i].position.x + cameraOffset.x, stationList[i].position.y + cameraOffset.y };
+            bool isOnPath = false;
+            for (int nodeIndex : anim.path) if (nodeIndex == i) isOnPath = true;
+            Color ringColor = i == sourceIndex ? Color{ 30, 220, 120, 255 }
+                : i == destIndex ? Color{ 255, 100, 80, 255 }
+                : isOnPath ? Color{ 30, 200, 200, 255 }
+            : Color{ 55, 95, 160, 255 };
+            if (isOnPath || i == sourceIndex || i == destIndex)
+                DrawCircleV(screenPos, 34 + 4 * sinf(pulseTime), ColorAlpha(ringColor, .2f));
+            DrawCircleV(screenPos, 28, ringColor);
+            DrawCircleV(screenPos, 22, { 18, 26, 50, 255 });
+            DrawCircleV(screenPos, 10, ringColor);
+            int nameWidth = MeasureText(stationList[i].name.c_str(), 16);
+            DrawRectangle((int)screenPos.x - nameWidth / 2 - 8, (int)screenPos.y - 48, nameWidth + 16, 24, { 8, 12, 28, 220 });
+            DrawText(stationList[i].name.c_str(), (int)screenPos.x - nameWidth / 2, (int)screenPos.y - 44, 16,
+                isOnPath ? Color{ 30, 220, 200, 255 } : Color{ 170, 205, 255, 255 });
+        }
+
+        // Side panel
+        DrawRectangle(0, 0, panelWidth, screenH, { 28, 42, 70, 255 });
+        DrawRectangle(panelWidth - 1, 0, 1, screenH, { 55, 90, 160, 200 });
+        DrawRectangle(0, 0, panelWidth, 95, { 38, 56, 92, 255 });
+        DrawRectangle(0, 94, panelWidth, 1, { 65, 115, 200, 255 });
+        DrawText("LAHORE METRO", 22, 20, 32, { 55, 190, 255, 255 });
+        DrawText("Route Finder", 24, 58, 20, { 140, 185, 240, 255 });
+
+        drawInputBox({ 16, 115, (float)panelWidth - 32, 65 }, "SOURCE STATION", sourceInput, sourceActive, { 30, 220, 120, 255 }, mousePos);
+        drawInputBox({ 16, 195, (float)panelWidth - 32, 65 }, "DESTINATION STATION", destInput, destActive, { 255, 100, 80, 255 }, mousePos);
+
+        int halfButtonWidth = (panelWidth - 48) / 2;
+        if (drawButton({ 16, 280, (float)halfButtonWidth, 54 }, "BFS", { 18, 112, 70, 255 }, WHITE, mousePos, 20)) {
+            int src = findStation(sourceInput), dst = findStation(destInput);
+            if (src == -1 || dst == -1) statusText = "Station not found.";
+            else { auto path = bfs(src, dst); if (!path.empty()) { anim = { path, 0, 0, true, false, false }; statusText = "BFS: " + to_string((int)path.size() - 1) + " stops"; } else statusText = "No route found."; }
+        }
+        if (drawButton({ (float)(16 + halfButtonWidth + 16), 280, (float)halfButtonWidth, 54 }, "DFS", { 145, 92, 20, 255 }, WHITE, mousePos, 20)) {
+            int src = findStation(sourceInput), dst = findStation(destInput);
+            if (src == -1 || dst == -1) statusText = "Station not found.";
+            else { auto path = dfs(src, dst); if (!path.empty()) { anim = { path, 0, 0, true, false, true }; statusText = "DFS: " + to_string((int)path.size() - 1) + " stops"; } else statusText = "No route found."; }
+        }
+        if (drawButton({ 16, 350, (float)panelWidth - 32, 48 }, "Clear", { 55, 35, 50, 255 }, { 230, 185, 225, 255 }, mousePos, 18)) {
+            sourceInput.clear(); destInput.clear(); anim = {};
+            statusText = "Type source & destination, then press BFS or DFS";
+            sourceActive = destActive = false;
+        }
+
+        DrawLine(16, 415, panelWidth - 16, 415, { 50, 75, 130, 150 });
+        int listY = 430;
+        if (!anim.path.empty()) {
+            Color pathColor = anim.isDFS ? Color{ 255, 165, 40, 255 } : Color{ 30, 225, 130, 255 };
+            DrawText("ROUTE INFO", 16, listY, 16, { 120, 175, 235, 255 });
+            DrawText(anim.isDFS ? "DFS Traversal Path" : "BFS Shortest Path", 16, listY + 26, 22, pathColor);
+            DrawText(TextFormat("%d stops total", (int)anim.path.size() - 1), 16, listY + 54, 18, { 190, 215, 250, 255 });
+            listY += 85;
+            for (int i = 0; i < (int)anim.path.size() && listY < screenH - 185; i++) {
+                Color stopColor = i == 0 ? Color{ 30, 220, 120, 255 }
+                    : i == (int)anim.path.size() - 1 ? Color{ 255, 100, 80, 255 }
+                : Color{ 160, 195, 245, 255 };
+                DrawText((to_string(i + 1) + ". " + stationList[anim.path[i]].name).c_str(), 20, listY, 22, stopColor);
+                listY += 30;
+            }
+        }
+
+        int footerY = screenH - 170;
+        DrawLine(16, footerY - 10, panelWidth - 16, footerY - 10, { 50, 75, 130, 150 });
+        DrawText("CURRENT STATUS", 16, footerY, 13, { 120, 175, 235, 255 });
+        DrawRectangleRec({ 16, (float)footerY + 20, (float)panelWidth - 32, 45 }, { 20, 30, 55, 255 });
+        DrawRectangleLinesEx({ 16, (float)footerY + 20, (float)panelWidth - 32, 45 }, 1, { 45, 70, 115, 255 });
+        DrawText(statusText.c_str(), 26, footerY + 34, 15, { 55, 215, 255, 255 });
+
+        if (drawButton({ 16, (float)screenH - 110, (float)panelWidth - 32, 44 }, "+ Add New Station", { 22, 65, 38, 255 }, { 140, 230, 170, 255 }, mousePos, 17))
+        {
+            showAddStation = true; newStationName.clear(); stationMessage = ""; newStationActive = true;
+        }
+        if (drawButton({ 16, (float)screenH - 58, (float)panelWidth - 32, 46 }, "+ Add New Route", { 28, 65, 130, 255 }, { 150, 210, 255, 255 }, mousePos, 18))
+        {
+            showAddRoute = true; routeField1.clear(); routeField2.clear(); routeMessage = ""; route1Active = true; route2Active = false;
+        }
+
+        DrawText("C=center | Right-drag=pan | Left-drag=move", panelWidth + 20, screenH - 25, 13, { 65, 95, 145, 200 });
+
+        // Station hint for add-route popup
+        string availableHint = "Available: ";
+        for (int i = 0; i < (int)stationList.size(); i++) {
+            availableHint += stationList[i].name;
+            if (i < (int)stationList.size() - 1) availableHint += ", ";
+        }
+
+        if (showAddRoute) drawPopup(screenW, screenH, "ADD NEW ROUTE", mousePos,
+            "Station 1 (must exist):", routeField1, route1Active,
+            "Station 2 (must exist):", routeField2, route2Active,
+            routeMessage, showAddRoute, [&]() {
+                if (routeField1.empty() || routeField2.empty()) { routeMessage = "Both fields required!"; }
+                else if (toLower(routeField1) == toLower(routeField2)) { routeMessage = "Stations must be different!"; }
+                else {
+                    int a = findStation(routeField1), b = findStation(routeField2);
+                    if (a == -1) routeMessage = "'" + routeField1 + "' not found!";
+                    else if (b == -1) routeMessage = "'" + routeField2 + "' not found!";
+                    else if (routeExists(a, b)) routeMessage = "Route already exists!";
+                    else { routeList.push_back({ a, b }); saveAll(); routeMessage = "Route added! Map updated."; routeField1.clear(); routeField2.clear(); }
+                }
+            }, availableHint.c_str());
+
+        string emptyField = "";
+        bool dummyActive = false;
+        if (showAddStation) drawPopup(screenW, screenH, "ADD NEW STATION", mousePos,
+            "Station name:", newStationName, newStationActive,
+            "", emptyField, dummyActive,
+            stationMessage, showAddStation, [&]() {
+                if (newStationName.empty()) { stationMessage = "Name cannot be empty!"; }
+                else if (findStation(newStationName) != -1) { stationMessage = "Station already exists!"; }
+         else {
+                    int totalStations = (int)stationList.size();
+                    float centerX = 600, centerY = 350;
+                    if (totalStations > 0) {
+                        float sumX = 0, sumY = 0;
+                        for (auto& s : stationList) { sumX += s.position.x; sumY += s.position.y; }
+                        centerX = sumX / totalStations; centerY = sumY / totalStations;
+                    }
+                    float angle = (2 * 3.14159f / max(totalStations, 6)) * totalStations;
+                    float radius = 220.f + totalStations * 22.f;
+                    stationList.push_back({ newStationName, { centerX + radius * cosf(angle), centerY + radius * sinf(angle) } });
+                    saveAll(); stationMessage = "Station '" + newStationName + "' added!"; newStationName.clear();
+                }
+            });
+
+        EndDrawing();
+    }
+    saveAll();
+    CloseWindow();
+    return 0;
+}
