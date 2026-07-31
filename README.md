@@ -81,10 +81,3 @@ Add screenshots of the application here.
 <img width="1919" height="978" alt="image" src="https://github.com/user-attachments/assets/70fd1666-a4c7-4295-aeae-8813853e4991" />
 
 <img width="1911" height="988" alt="image" src="https://github.com/user-attachments/assets/d865b1c4-e668-465e-91fc-b2eaf8f19d94" />
-
-
----
-
-## License
-
-This project was developed for educational purposes as part of a Computer Engineering course.
